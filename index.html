@@ -262,14 +262,6 @@ const KW = {
   graves:  ['grave','tomb','cemetery','churchyard','mausoleum','burial','crypt','sepulchre','sepulcher','catacomb','vault','interred','buried here'],
   ruins:   ['ruin','ruined','ruins','abandoned','derelict','deserted','dissolved','dissolution']
 };
-// historic "signal" words — a Wikipedia hit must match one of these (or a category) to be kept
-const SIGNAL = [].concat(...Object.values(KW), [
-  'hall','castle','abbey','priory','friary','church','chapel','minster','cathedral','manor','mill',
-  'cross','monument','tower','well','bridge','almshouse','plague','workhouse','asylum','lunatic',
-  'cholera','folly','fort','camp','hoard','wreck','memorial','obelisk','priory','old ','medieval',
-  'saxon','norman','tudor','victorian','listed building','scheduled monument','site of','remains of'
-]);
-
 function categorise(text){
   const t = text.toLowerCase();
   for(const k of ['crime','war','folklore','ancient','graves','ruins']){
@@ -277,33 +269,62 @@ function categorise(text){
   }
   return 'history';
 }
-function onTheme(text){
-  const t = text.toLowerCase();
-  return SIGNAL.some(w => t.includes(w));
+
+/* Wikipedia FILTERING by article CATEGORY — this is what keeps "things to see"
+   (a specific castle, church, monument, barrow) and throws out "things to read
+   about" (a village, town, parish, suburb). */
+const STRUCT_CAT = /(listed buildings|castles|country houses|manor houses|churches|chapels|abbeys|priories|monasteries|friaries|cathedrals|minsters|ruins|scheduled monuments|monuments and memorials|war memorials|memorials in|cenotaphs|archaeological sites|stone circles|standing stones|megalith|hill ?forts|barrows|tumuli|cairns|henges|holy wells|towers in|windmills|watermills|follies|bridges in|museums in|cemeteries|mausolea|mausoleums|tombs|battlefields|battles of|sieges of|statues|sculptures in|lighthouses|reportedly haunted|hauntings|murders in|roman sites|roman villas|priory|country parks|deserted medieval villages|crosses in|gardens in)/i;
+const SETTLE_CAT = /(villages in|hamlets in|towns in|market towns|civil parishes|former civil parishes|populated places|suburbs of|areas of|districts of|unparished areas|electoral wards|wards of|townships in|geography of|former settlements|localities)/i;
+
+/* narrow "this is a specific notable mystery" set — rescues intangible sites
+   (a murder, a battle, a legend) that have no structure category */
+const MYST = [].concat(KW.crime, KW.folklore, KW.war, KW.ancient, KW.graves, KW.ruins);
+function strongMystery(t){ t=t.toLowerCase(); return MYST.some(w => t.includes(w)); }
+
+/* decide whether a Wikipedia article is a place worth visiting */
+function keepWiki(catsBlob, textBlob){
+  if(STRUCT_CAT.test(catsBlob)) return true;     // it's a structure / heritage site
+  if(SETTLE_CAT.test(catsBlob)) return false;    // it's a settlement / admin area — drop
+  return strongMystery(textBlob);                // else keep only if it's a specific mystery
 }
 
 /* ------------------------------------------------------------------ */
 /*  OSM TAG → CATEGORY                                                 */
 /* ------------------------------------------------------------------ */
 function categoriseOSM(tags){
-  const h = tags.historic||'', m = tags.military||'';
+  const h = tags.historic||'', m = tags.military||'', mm = tags.man_made||'';
   if(m || h==='battlefield' || tags.memorial==='war_memorial' || /war/.test((tags.name||'').toLowerCase())) return 'war';
   if(h==='tomb' || tags.landuse==='cemetery' || tags.amenity==='grave_yard') return 'graves';
   if(['archaeological_site','megalith','standing_stone','stone','tumulus','cairn','hillfort','tomb','rune_stone'].includes(h) || tags.site_type==='megalith') return 'ancient';
-  if(['ruins','castle','manor','fort','city_gate'].includes(h)) return 'ruins';
+  if(tags.ruins==='yes' || ['ruins','castle','manor','fort','city_gate'].includes(h)) return 'ruins';
   if(['memorial','monument','cross','wayside_cross','obelisk','cenotaph'].includes(h)) return 'history';
+  if(['windmill','watermill','lighthouse','obelisk'].includes(mm)) return 'history';
+  if(tags.heritage){                                   // listed/heritage building
+    const use = (tags.building||'')+' '+(tags.amenity||'');
+    if(/church|chapel|cathedral|abbey|priory|minster|place_of_worship/.test(use)) return 'ancient';
+    return 'history';
+  }
   return 'history';
 }
 function osmLabel(tags){
   if(tags.name) return tags.name;
-  const h = tags.historic, m = tags.military;
+  const h = tags.historic, m = tags.military, mm = tags.man_made;
   const nice = {
     pillbox:'Pillbox', bunker:'Bunker', memorial:'War memorial', ruins:'Ruins', castle:'Castle (remains)',
     archaeological_site:'Archaeological site', tomb:'Tomb', monument:'Monument', cross:'Old cross',
     wayside_cross:'Wayside cross', boundary_stone:'Boundary stone', battlefield:'Battlefield',
-    standing_stone:'Standing stone', cairn:'Cairn', tumulus:'Barrow / tumulus', city_gate:'Old city gate'
+    standing_stone:'Standing stone', cairn:'Cairn', tumulus:'Barrow / tumulus', city_gate:'Old city gate',
+    windmill:'Windmill', watermill:'Watermill', lighthouse:'Lighthouse', obelisk:'Obelisk'
   };
-  return nice[h] || nice[m] || (h ? h.replace(/_/g,' ') : 'Historic feature');
+  if(nice[h]) return nice[h];
+  if(nice[m]) return nice[m];
+  if(nice[mm]) return nice[mm];
+  if(tags.ruins==='yes') return 'Ruins';
+  if(tags.heritage){
+    const b = (tags.building||'').replace(/_/g,' ');
+    return b && b!=='yes' ? b.charAt(0).toUpperCase()+b.slice(1) : 'Listed building';
+  }
+  return h ? h.replace(/_/g,' ') : 'Historic feature';
 }
 
 /* ------------------------------------------------------------------ */
@@ -341,18 +362,19 @@ async function fetchWiki(lat,lon,radius){
   const hits = (d.query && d.query.geosearch) || [];
   if(!hits.length) return [];
   const ids = hits.map(h=>h.pageid).slice(0,50).join('|');
-  const ex = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts|pageimages&exintro=1&explaintext=1&piprop=thumbnail&pithumbsize=260&pageids=${ids}&format=json&origin=*`;
+  const ex = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts|pageimages|categories&exintro=1&explaintext=1&piprop=thumbnail&pithumbsize=260&clshow=!hidden&cllimit=80&pageids=${ids}&format=json&origin=*`;
   const r2 = await fetch(ex); const d2 = await r2.json();
   const pages = (d2.query && d2.query.pages) || {};
   const out=[];
   for(const h of hits){
-    const p = pages[h.pageid] || {};
+    const p = pages[h.pageid]; if(!p) continue;
     const extract = p.extract || '';
+    const cats = (p.categories||[]).map(c=>c.title.replace(/^Category:/,'')).join(' | ');
     const blob = h.title + ' ' + extract;
-    if(!onTheme(blob)) continue;                 // keep only on-theme history/mystery
+    if(!keepWiki(cats, blob)) continue;          // keep "things to see", drop settlements
     out.push({
       src:'wiki', id:'w'+h.pageid, name:h.title, lat:h.lat, lon:h.lon,
-      dist:h.dist, cat:categorise(blob), extract,
+      dist:h.dist, cat:categorise(cats+' '+blob), extract,
       thumb: p.thumbnail ? p.thumbnail.source : null,
       url: 'https://en.wikipedia.org/?curid='+h.pageid
     });
@@ -363,11 +385,14 @@ async function fetchWiki(lat,lon,radius){
 async function fetchOverpass(lat,lon,radius){
   const q = `[out:json][timeout:25];(
     nwr(around:${radius},${lat},${lon})["historic"];
-    nwr(around:${radius},${lat},${lon})["military"~"bunker|pillbox|trench|tower|naval_base"];
+    nwr(around:${radius},${lat},${lon})["heritage"];
+    nwr(around:${radius},${lat},${lon})["military"~"bunker|pillbox|trench"];
     nwr(around:${radius},${lat},${lon})["memorial"];
+    nwr(around:${radius},${lat},${lon})["man_made"~"obelisk|lighthouse|windmill|watermill"];
+    nwr(around:${radius},${lat},${lon})["ruins"="yes"];
     nwr(around:${radius},${lat},${lon})["landuse"="cemetery"];
     nwr(around:${radius},${lat},${lon})["amenity"="grave_yard"];
-  );out center tags 350;`;
+  );out center tags 400;`;
   const r = await fetch('https://overpass-api.de/api/interpreter',{method:'POST',body:'data='+encodeURIComponent(q)});
   if(!r.ok) throw new Error('overpass '+r.status);
   const d = await r.json();
@@ -376,7 +401,10 @@ async function fetchOverpass(lat,lon,radius){
     const la = e.lat ?? (e.center&&e.center.lat), lo = e.lon ?? (e.center&&e.center.lon);
     if(la==null||lo==null) continue;
     const tags = e.tags||{};
-    if(!tags.historic && !tags.military && !tags.memorial && tags.landuse!=='cemetery' && tags.amenity!=='grave_yard') continue;
+    const onTheme = tags.historic||tags.heritage||tags.military||tags.memorial||
+                    /obelisk|lighthouse|windmill|watermill/.test(tags.man_made||'')||
+                    tags.ruins==='yes'||tags.landuse==='cemetery'||tags.amenity==='grave_yard';
+    if(!onTheme) continue;
     out.push({
       src:'osm', id:'o'+e.type+e.id, name:osmLabel(tags), lat:la, lon:lo,
       dist:hav(lat,lon,la,lo), cat:categoriseOSM(tags), extract:'',
